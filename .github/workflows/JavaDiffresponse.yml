@@ -1,4 +1,4 @@
-name: AI Java Diff Review
+name: Java AI PR Review
 
 on:
   pull_request:
@@ -10,55 +10,61 @@ permissions:
   models: read
 
 jobs:
-  java-diff-review:
+  review-java-changes:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Code
+      - name: Checkout code
         uses: actions/checkout@v3
 
-      - name: Fetch Base Branch
-        run: git fetch origin master
+      - name: Fetch full history
+        run: |
+          git fetch --unshallow || true
+          git fetch origin master
 
-      - name: Get Java File Diff
+      - name: Get diff for Java files
         id: get_diff
         run: |
           DIFF=$(git diff origin/master...HEAD -- '*.java' | head -c 7000)
+          echo "$DIFF"
+          echo "$DIFF" > diff.txt
           if [ -z "$DIFF" ]; then
-            echo "No Java changes detected"
             echo "skip=true" >> $GITHUB_OUTPUT
           else
-            echo "$DIFF" > diff.txt
             echo "skip=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Call GitHub AI
+      - name: Review diff with GitHub AI
         if: steps.get_diff.outputs.skip != 'true'
-        id: ai
+        id: ai_review
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          PROMPT="Summarize the differences in the following Java code diff only. Be clear and concise:\n\n$(cat diff.txt)"
+          PROMPT="You are a senior Java developer. Review the following Java code diff and summarize what changed:\n\n$(cat diff.txt)"
 
-          PAYLOAD=$(jq -n --arg content "$PROMPT" '{
+          PAYLOAD=$(jq -n --arg prompt "$PROMPT" '{
             "model": "openai/gpt-4o",
-            "messages": [{"role": "user", "content": $content}]
+            "messages": [
+              { "role": "user", "content": $prompt }
+            ]
           }')
 
+          echo "Calling GitHub AI model..."
           RESPONSE=$(curl -s https://models.github.ai/inference/chat/completions \
             -H "Authorization: Bearer $GITHUB_TOKEN" \
             -H "Content-Type: application/json" \
             -d "$PAYLOAD")
 
-          echo "$RESPONSE" > raw_response.json
+          echo "$RESPONSE" > raw.json
 
-          CONTENT=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // empty')
-          if [ -z "$CONTENT" ]; then
-            echo "No response from model."
-            CONTENT="⚠️ GitHub AI model did not return a summary."
+          SUMMARY=$(echo "$RESPONSE" | jq -r '.choices[0].message.content // empty')
+
+          if [ -z "$SUMMARY" ]; then
+            echo "❌ GitHub AI model did not return a summary."
+            echo "⚠️ GitHub AI model did not return a summary." > summary.txt
+          else
+            echo "$SUMMARY" > summary.txt
           fi
-
-          echo "$CONTENT" > response.txt
 
       - name: Comment on PR
         if: steps.get_diff.outputs.skip != 'true'
@@ -66,4 +72,5 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           PR_NUMBER=$(jq --raw-output .pull_request.number "$GITHUB_EVENT_PATH")
-          gh pr comment "$PR_NUMBER" --body "$(cat response.txt)"
+          COMMENT=$(cat summary.txt)
+          gh pr comment "$PR_NUMBER" --body "$COMMENT"
