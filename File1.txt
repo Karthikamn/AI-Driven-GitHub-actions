@@ -8,3 +8,4 @@ debugging - EOf
 debugging - regex
 debugged tried
 last
+append
