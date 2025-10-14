@@ -11,7 +11,7 @@ public class Hello {
         // Unsafe code (triggers LOW regex)
         eval("2 + 2");
         String apiKey = "my-secret-api-key";
-         String apiKey = "my-secret-api-key-two";
+         String apiKey = "my-secret-api-key-two22";
 
         System.out.println("Hello, world!");
     }
