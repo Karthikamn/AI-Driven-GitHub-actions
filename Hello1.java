@@ -6,7 +6,7 @@ public class Hello1 {
 
         // Hardcoded password (triggers HIGH regex)
         String password = "SuperSecret123";
-        String password1 = "SuperSecret123435#";
+        String password1 = "SuperSecret1234354343##";
 
         // Unsafe code (triggers LOW regex)
         eval("2 + 2");
