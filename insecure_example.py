@@ -10,7 +10,7 @@ AWS_ACCESS_KEY_ID = "AKIA1234567890ABCDE"
 AWS_SECRET_ACCESS_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
 
 # Hardcoded password (fake)
-db_password = "SuperSecretP@ssword123"
+db_password = "SuperSecretP@ssword1234"
 
 # Insecure eval usage
 user_input = "os.system('rm -rf /')"
