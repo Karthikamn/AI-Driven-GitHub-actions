@@ -15,4 +15,8 @@ public class Hello {
      public String greet2(int userid) {
         return "Hello, " + userid + "!";
     }
+
+    public String greet3(int userid2) {
+        return "Hello, " + userid2 + "!";
+    }
 }
