@@ -6,7 +6,7 @@ import sqlite3
 import ssl
 
 # Hardcoded AWS keys (fake)
-AWS_ACCESS_KEY_ID = "AKIA1234567890ABCDE"
+AWS_ACCESS_KEY_ID = "AKIA1234567890ABCDE4"
 AWS_SECRET_ACCESS_KEY = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
 
 # Hardcoded password (fake)
