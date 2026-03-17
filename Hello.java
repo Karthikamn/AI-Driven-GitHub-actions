@@ -20,13 +20,4 @@ public class Hello {
         return "Hello, " + userid2 + "!";
     }
     
-     public String greet4(int userid3) {
-        return "Hello, " + userid3 + "!";
-
-          public String greet5(int userid5) {
-        return "Hello, " + userid5 + "!";
-    }
-
-      public String greetnewmarch(int userid10) {
-        return "Hello, " + userid10 + "!";
 }
