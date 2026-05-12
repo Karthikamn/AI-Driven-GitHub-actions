@@ -1,0 +1,287 @@
+# .github/workflows/security-pr-flagging-ai-sast.yml
+name: Security PR Flagging - AI + Rules-based SAST
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  checks: write
+  statuses: write
+  models: read
+
+env:
+  BLOCK_ON_WARNINGS: "true"
+  BLOCK_ON_HIGH_SEVERITY_REGEX: "true"
+  GH_MODEL: "gpt-4o-mini"
+  MODEL_TEMPERATURE: "0"
+
+jobs:
+  security-scan:
+    name: AI-assisted SAST (rules + GitHub model)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install small tools (rg, jq, gh)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ripgrep jq procps curl ca-certificates
+          if ! command -v gh >/dev/null 2>&1; then
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+              | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+            sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+              | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+            sudo apt-get update -y
+            sudo apt-get install -y gh
+          fi
+          gh --version || true
+          rg --version || true
+          jq --version || true
+
+      - name: Fetch base branch
+        run: |
+          # ensure base ref is present for diffs
+          git fetch origin ${{ github.event.pull_request.base.ref }}:refs/remotes/origin/${{ github.event.pull_request.base.ref }} || true
+
+      - name: Save PR diff (used by AI)
+        run: |
+          git diff origin/${{ github.event.pull_request.base.ref }}...HEAD -U0 > pr_diff.txt || true
+          echo "=== DIFF START ===" > pr_diff_headline.txt
+          head -n 50 pr_diff.txt >> pr_diff_headline.txt || true
+          echo "" >> pr_diff_headline.txt
+          echo "Changed files:" >> pr_diff_headline.txt
+          git diff --name-only origin/${{ github.event.pull_request.base.ref }}...HEAD >> pr_diff_headline.txt || true
+
+      - name: Get list of changed files
+        id: files
+        run: |
+          git diff --name-only origin/${{ github.event.pull_request.base.ref }}...HEAD > changed_files.txt || true
+          wc -l changed_files.txt || true
+          echo "CHANGED_FILES<<'EOF'" >> $GITHUB_ENV
+          cat changed_files.txt >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Rules-based regex scan (fast)
+        id: regexscan
+        run: |
+          set -uo pipefail
+          jq -n '{high:[], low:[]}' > regex_results.json
+          printf "%s\n" "$CHANGED_FILES" > /tmp/changed_files_list.txt
+
+          if [ ! -s /tmp/changed_files_list.txt ]; then
+            echo "::warning::No changed files detected."
+            echo "{}" > regex_results.json
+            exit 0
+          fi
+
+          HIGH_PATTERNS=(
+            '[A-Za-z0-9/+=]{40}'
+            'AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}'
+            '-----BEGIN (RSA|PRIVATE|EC|OPENSSH) PRIVATE KEY-----'
+            "(password|passwd)[\"']?\s*[:=]\s*['\"].{3,}"
+            '([A-Fa-f0-9]{32,})'
+          )
+
+          LOW_PATTERNS=(
+            '\beval\(|\bexec\('
+            '["'"'"']\s*\+\s*\w+\s*\+\s*["'"'"']'
+            'rejectUnauthorized\s*[:=]\s*false|verify=False'
+            'api[_-]?key|secret[_-]?key'
+          )
+
+          while IFS= read -r file; do
+            if [ -z "$file" ] || [ ! -f "$file" ]; then
+              continue
+            fi
+
+            case "$file" in
+              *.png|*.jpg|*.jpeg|*.gif|*.pdf|*.zip|*.bin) continue ;;
+            esac
+
+            for pat in "${HIGH_PATTERNS[@]}"; do
+              rg --no-filename -n --pcre2 "$pat" "$file" 2>/dev/null | while IFS=: read -r line content; do
+                snippet=$(printf '%s' "$content" | sed 's/"/\\"/g' | sed 's/^[[:space:]]*//')
+                jq --arg f "$file" --arg l "$line" --arg m "$snippet" --arg p "$pat" '.high += [{"file":$f,"line":$l,"snippet":$m,"pattern":$p}]' regex_results.json > /tmp/rr.json && mv /tmp/rr.json regex_results.json
+              done
+            done
+
+            for pat in "${LOW_PATTERNS[@]}"; do
+              rg --no-filename -n --pcre2 "$pat" "$file" 2>/dev/null | while IFS=: read -r line content; do
+                snippet=$(printf '%s' "$content" | sed 's/"/\\"/g' | sed 's/^[[:space:]]*//')
+                jq --arg f "$file" --arg l "$line" --arg m "$snippet" --arg p "$pat" '.low += [{"file":$f,"line":$l,"snippet":$m,"pattern":$p}]' regex_results.json > /tmp/rr.json && mv /tmp/rr.json regex_results.json
+              done
+            done
+
+          done < /tmp/changed_files_list.txt
+
+          cat regex_results.json
+          echo "REGEX_RESULTS<<'JSON'" >> $GITHUB_ENV
+          cat regex_results.json >> $GITHUB_ENV
+          echo "JSON" >> $GITHUB_ENV
+
+      - name: AI Security Analysis (GitHub model)
+        id: ai
+        env:
+          GH_MODEL: ${{ env.GH_MODEL }}
+          MODEL_TEMPERATURE: ${{ env.MODEL_TEMPERATURE }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+
+          DIFF_FILE=pr_diff.txt
+          if [ ! -s "$DIFF_FILE" ]; then
+            echo "::warning::Empty diff; nothing to analyze with AI."
+            echo "NO_RISK" > ai_analysis.txt
+            echo "AI_ANALYSIS<<'TXT'" >> $GITHUB_ENV
+            cat ai_analysis.txt >> $GITHUB_ENV
+            echo "TXT" >> $GITHUB_ENV
+            exit 0
+          fi
+
+          # write system prompt to a file (avoids YAML quoting issues)
+          cat > system_prompt.txt <<'PROMPT'
+          You are a strict security reviewer specialized in code-level security. Analyze the provided PR diff and:
+          - Identify any risky security patterns (bypassed authentication/authorization, insecure input validation, SQL injection, command injection, unsafe `eval`/`exec`, insecure deserialization, hardcoded credentials, use of weak crypto/incorrect TLS handling).
+          - For each finding, emit a JSON list of objects with fields: "severity" (HIGH|MEDIUM|LOW), "summary", "file", "line_hint" (if available), and "explain" (one short sentence).
+          - If no risky patterns are found, output the single token: NO_RISK
+          Respond ONLY with valid JSON or the token NO_RISK.
+          PROMPT
+
+          # build a safe JSON payload for the model call
+          INPUT_JSON=$(jq -nc --arg model "$GH_MODEL" --arg temp "$MODEL_TEMPERATURE" --arg sys "$(cat system_prompt.txt)" --arg diff "$(cat pr_diff.txt)" '{ model: $model, temperature: ($temp|tonumber), messages: [ {role:"system", content:$sys}, {role:"user", content:$diff} ], max_tokens: 1200 }')
+
+          # call the GitHub GraphQL CreateChatCompletion API via gh
+          RESPONSE=$(gh api graphql -f query='
+            mutation($input: CreateChatCompletionInput!) {
+              createChatCompletion(input: $input) {
+                message {
+                  content
+                }
+              }
+            }' -F input="$INPUT_JSON" --jq '.data.createChatCompletion.message.content' 2>/dev/null || true)
+
+          echo "${RESPONSE:-}" > ai_analysis.txt
+          echo "AI_ANALYSIS<<'TXT'" >> $GITHUB_ENV
+          cat ai_analysis.txt >> $GITHUB_ENV
+          echo "TXT" >> $GITHUB_ENV
+
+          echo "=== AI OUTPUT (first 200 lines) ==="
+          sed -n '1,200p' ai_analysis.txt || true
+          echo "=== END AI OUTPUT ==="
+
+      - name: Aggregate & decide (fail on policy)
+        id: decide
+        env:
+          BLOCK_ON_WARNINGS: ${{ env.BLOCK_ON_WARNINGS }}
+          BLOCK_ON_HIGH_SEVERITY_REGEX: ${{ env.BLOCK_ON_HIGH_SEVERITY_REGEX }}
+        run: |
+          set -uo pipefail
+
+          REGEX_JSON="$REGEX_RESULTS"
+          AI_OUT="$AI_ANALYSIS"
+
+          summary_file=security_summary.md
+          echo "# Security Analysis Report" > $summary_file
+          echo "" >> $summary_file
+          echo "Generated by: rules-based scanner + GitHub model" >> $summary_file
+          echo "" >> $summary_file
+
+          echo "## Rules-based scanner findings" >> $summary_file
+          echo "" >> $summary_file
+
+          if [ "$(echo "$REGEX_JSON" | jq -r '.high | length')" -gt 0 ]; then
+            echo "### HIGH severity (regex)" >> $summary_file
+            echo "" >> $summary_file
+            echo "$REGEX_JSON" | jq -r '.high[] | "- `\(.file):\(.line)` — \(.pattern) — snippet: ``\(.snippet|gsub("\n";" "))``"' >> $summary_file
+            echo "" >> $summary_file
+          else
+            echo "- No HIGH severity regex matches found." >> $summary_file
+            echo "" >> $summary_file
+          fi
+
+          if [ "$(echo "$REGEX_JSON" | jq -r '.low | length')" -gt 0 ]; then
+            echo "### LOW/INFO severity (regex)" >> $summary_file
+            echo "" >> $summary_file
+            echo "$REGEX_JSON" | jq -r '.low[] | "- `\(.file):\(.line)` — \(.pattern) — snippet: ``\(.snippet|gsub("\n";" "))``"' >> $summary_file
+            echo "" >> $summary_file
+          else
+            echo "- No LOW severity regex matches found." >> $summary_file
+            echo "" >> $summary_file
+          fi
+
+          echo "## AI model findings" >> $summary_file
+          echo "" >> $summary_file
+
+          if echo "$AI_OUT" | grep -q '^NO_RISK$'; then
+            echo "- AI model: NO_RISK" >> $summary_file
+          else
+            if echo "$AI_OUT" | jq -e . >/dev/null 2>&1; then
+              echo "$AI_OUT" | jq -r '.[] | "- [\(.severity)] \(.summary) (\(.file // "unknown"): \(.line_hint // "-")) — \(.explain)"' >> $summary_file
+            else
+              echo "#### AI raw output (unexpected format):" >> $summary_file
+              echo '```' >> $summary_file
+              head -n 200 ai_analysis.txt >> $summary_file || true
+              echo '```' >> $summary_file
+            fi
+          fi
+
+          echo "" >> $summary_file
+
+          echo "SECURITY_SUMMARY<<'MD'" >> $GITHUB_ENV
+          cat $summary_file >> $GITHUB_ENV
+          echo "MD" >> $GITHUB_ENV
+
+          BLOCK_REASON=""
+
+          if [ "$(echo "$REGEX_JSON" | jq -r '.high | length')" -gt 0 ] && [ "${BLOCK_ON_HIGH_SEVERITY_REGEX}" = "true" ]; then
+            BLOCK_REASON="High severity regex findings"
+          fi
+
+          if ! echo "$AI_OUT" | grep -q '^NO_RISK$' && [ "${BLOCK_ON_WARNINGS}" = "true" ]; then
+            if [ -z "$BLOCK_REASON" ]; then
+              BLOCK_REASON="AI-detected security findings"
+            else
+              BLOCK_REASON="$BLOCK_REASON; AI also reported findings"
+            fi
+          fi
+
+          if [ -n "$BLOCK_REASON" ]; then
+            echo "BLOCK=true" >> $GITHUB_ENV
+            echo "BLOCK_REASON=$BLOCK_REASON" >> $GITHUB_ENV
+            echo "::error title=Security check blocked::${BLOCK_REASON}"
+          else
+            echo "BLOCK=false" >> $GITHUB_ENV
+            echo "::notice::No blocking security findings detected."
+          fi
+
+      - name: Post comment on PR with results
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const body = process.env.SECURITY_SUMMARY || "No summary generated.";
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const issue_number = context.issue.number;
+            await github.rest.issues.createComment({
+              owner, repo, issue_number, body: `🔐 **Automated Security Report**\n\n${body}\n\n---\n*This check is automated: rules-based scanner + GitHub Model.*`
+            });
+
+      - name: Fail job if blocking policy triggered
+        if: always()
+        run: |
+          if [ "${BLOCK:-false}" = "true" ]; then
+            echo "Failing job due to: ${BLOCK_REASON}"
+            exit 1
+          else
+            echo "No blocking findings. Job will pass."
+          fi

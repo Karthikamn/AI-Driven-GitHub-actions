@@ -1,0 +1,7 @@
+Use case - Workflow - PR AI Review
+Create a File both in master and feature file .
+Add additionally lines to the file of the feature barnch.
+Create a Pull request.
+GH action will trigger the workflow.
+
+Same process for Java Program - Java AI PR Review
